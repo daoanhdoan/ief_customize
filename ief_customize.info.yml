@@ -1,0 +1,6 @@
+name: IEF Customize
+core_version_requirement: ^9
+type: module
+package: DNC- Fields
+dependencies:
+  - inline_entity_form:inline_entity_form

@@ -1,0 +1,541 @@
+<?php
+/**
+ *
+ */
+
+use Drupal\Component\Utility\NestedArray;
+use Drupal\Core\Entity\EntityInterface;
+use Drupal\Core\Field\FieldDefinitionInterface;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Render\Element;
+use Drupal\field\FieldConfigInterface;
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ *
+ * @see field_permissions_permissions_matrix()
+ */
+function ief_customize_form_field_config_edit_form_alter(&$form, FormStateInterface $form_state)
+{
+  /** @var \Drupal\field\FieldConfigInterface $field */
+  $field = $form_state->getFormObject()->getEntity();
+  // Filter views that list the entity type we want, and group the separate
+  // displays by view.
+  if (!in_array($field->getType(), ['entity_reference', 'entity_reference_revisions'])) {
+    return;
+  }
+  $settings = $field->getThirdPartySetting('ief_customize','settings');
+
+  $form['fid'] = ['#type' => 'hidden', '#value' => $field->id()];
+  $form['ief_customize'] = [
+    '#type' => 'details',
+    '#title' => 'IEF Customize Settings',
+    '#weight' => -10,
+    '#tree' => TRUE
+  ];
+
+  $form['ief_customize']['enable'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Enable'),
+    '#default_value' => $settings['enable'],
+  );
+
+  $form['#entity_builders'][] = 'ief_customize_field_config_edit_form_builder';
+}
+
+/**
+ * Form builder for the field config edit form.
+ *
+ * @see field_permissions_form_field_config_edit_form_alter
+ */
+function ief_customize_field_config_edit_form_builder($entity_type, FieldConfigInterface $field, array &$form, FormStateInterface $form_state)
+{
+  $field->setThirdPartySetting('ief_customize', 'settings', $form_state->getValue('ief_customize'));
+  $field->save();
+}
+
+/**
+ * Implements hook_theme().
+ */
+function ief_customize_theme() {
+  return [
+    'ief_customize_entity_table' => [
+      'render element' => 'form',
+    ],
+  ];
+}
+
+function ief_customize_get_entity_type_labels(FieldDefinitionInterface $field, $widget) {
+  // The admin has specified the exact labels that should be used.
+  if ($widget->getSettings()['override_labels']) {
+    return [
+      'singular' => $widget->getSettings()['label_singular'],
+      'plural' => $widget->getSettings()['label_plural'],
+    ];
+  }
+  else {
+    $target_type = $field->getSetting('target_type');
+    $inlineFormHandler = \Drupal::service('entity_type.manager')->getHandler($target_type, 'inline_form');
+    return $inlineFormHandler->getEntityTypeLabels();
+  }
+}
+
+/**
+ * Implements @see hook_field_widget_form_alter().
+ */
+function ief_customize_field_widget_form_alter(&$element, FormStateInterface $form_state, $context)
+{//return;
+  /** @var \Drupal\Core\Field\FieldItemList $items */
+  $items = $context['items'];
+  /** @var \Drupal\field\FieldConfigInterface $field_definition */
+  $field_definition = $items->getFieldDefinition();
+  if (!$field_definition instanceof FieldConfigInterface) {
+    return;
+  }
+  $settings = $field_definition->getThirdPartySetting('ief_customize','settings');
+  if (in_array($field_definition->getType(), ['entity_reference', 'entity_reference_revisions']) && !empty($settings['enable'])) {
+    $widget = $context['widget'];
+    if ($context['widget']->getPluginId() == 'inline_entity_form_complex_table_view_mode') {
+      $parent_langcode = $items->getEntity()->language()->getId();
+      $parents = array_merge($element['#field_parents'], [
+        $items->getName(),
+        'form',
+      ]);
+      $entities = $form_state->get(['inline_entity_form', $element['#ief_id'], 'entities']);
+      $open_form = $form_state->get(['inline_entity_form', $element['#ief_id'], 'form']);
+      $element['entities']['#theme'] = 'ief_customize_entity_table';
+      if ($open_form == 'reorder') {
+        return;
+      }
+      foreach (Element::children($element['entities']) as $key) {
+        if ($entities[$key]['form'] == 'remove') {
+          continue;
+        }
+        $entity = $element['entities'][$key]['#entity'];
+        if (!$entity->access('update')) {
+          continue;
+        }
+        $ief = [
+          '#type' => 'inline_entity_form',
+          '#entity_type' => $field_definition->getSetting('target_type'),
+          '#bundle' => $entity->bundle(),
+          '#langcode' => $parent_langcode,
+          '#default_value' => $entity,
+          '#op' => 'edit',
+          '#form_mode' => $widget->getSettings()['form_mode'],
+          '#revision' => $widget->getSettings()['revision'],
+          '#save_entity' => FALSE,
+          '#ief_row_delta' => $key,
+          '#parents' => array_merge($parents, ['inline_entity_form', 'entities', $key, 'form']),
+          '#ief_labels' => ief_customize_get_entity_type_labels($field_definition, $widget),
+          '#ief_id' => $element['#ief_id'],
+        ];
+
+        $element['entities'][$key]['form'] = [
+          '#type' => 'container',
+          '#attributes' => ['class' => ['ief-form', 'ief-form-row']],
+          'inline_entity_form' => $ief,
+        ];
+
+        $element['entities'][$key]['form']['inline_entity_form']['#process'] = [
+          ['\Drupal\inline_entity_form\Element\InlineEntityForm', 'processEntityForm'],
+          ['\Drupal\inline_entity_form\Plugin\Field\FieldWidget\InlineEntityFormComplex', 'addIefSubmitCallbacks'],
+          ['\Drupal\inline_entity_form\Plugin\Field\FieldWidget\InlineEntityFormComplex', 'buildEntityFormActions'],
+          'ief_customize_build_entity_form_actions'
+        ];
+
+        $element['entities'][$key]['select'] = [
+          '#type' => 'checkbox',
+          '#parents' => array_merge($parents, ['entities', $key, 'select']),
+          '#title' => t('Select'),
+          '#title_display' => 'invisible',
+        ];
+
+        $select_all = $form_state->get(['inline_entity_form', $element['#ief_id'], 'select_all']);
+        if ($select_all) {
+          $element['entities'][$key]['select']['#value'] = $select_all ? TRUE : FALSE;
+        }
+      }
+
+      if (count($entities) >= 2) {
+        $element['actions']['ief_reorder'] = [
+          '#type' => 'submit',
+          '#value' => t('Reorder'),
+          '#name' => 'ief-' . $element['#ief_id'] . '-reorder',
+          '#limit_validation_errors' => [array_merge($parents, ['actions'])],
+          '#ajax' => [
+            'callback' => 'inline_entity_form_get_element',
+            'wrapper' => 'inline-entity-form-' . $element['#ief_id'],
+          ],
+          '#submit' => ['inline_entity_form_open_form'],
+          '#ief_form' => 'reorder',
+        ];
+        $element['actions']['ief_select_all'] = [
+          '#type' => 'submit',
+          '#value' => t('Select All'),
+          '#title_display' => 'invisible',
+          '#name' => 'ief-' . $element['#ief_id'] . '-select-all',
+          '#limit_validation_errors' => [array_merge($parents, ['actions'])],
+          '#ajax' => [
+            'callback' => 'inline_entity_form_get_element',
+            'wrapper' => 'inline-entity-form-' . $element['#ief_id'],
+          ],
+          '#attributes' => ['class' => ['select-all']],
+          '#submit' => ['inline_entity_form_select_all_form'],
+          '#ief_form' => 'select_all',
+        ];
+        $element['actions']['ief_delete'] = [
+          '#type' => 'submit',
+          '#value' => t('Delete'),
+          '#name' => 'ief-' . $element['#ief_id'] . '-delete',
+          '#limit_validation_errors' => [array_merge($parents, ['actions'])],
+          '#ajax' => [
+            'callback' => 'inline_entity_form_get_element',
+            'wrapper' => 'inline-entity-form-' . $element['#ief_id'],
+          ],
+          '#submit' => ['inline_entity_form_open_form'],
+          '#ief_form' => 'delete',
+        ];
+      }
+
+      if ($open_form == 'delete') {
+        $element['form'] = [
+          '#type' => 'container',
+          '#attributes' => ['class' => ['ief-form', 'ief-form-row']],
+          '#parents' => $parents,
+          '#ief_id' => $element['#ief_id'],
+        ];
+        ief_customize_build_remove_form($element['form'], $field_definition, $widget);
+      }
+    }
+  }
+}
+
+/**
+ * Button #submit callback: Select all a form in the IEF widget.
+ *
+ * The form is shown below the entity table, at the bottom of the widget.
+ *
+ * @param $form
+ *   The complete parent form.
+ * @param $form_state
+ *   The form state of the parent form.
+ */
+
+function inline_entity_form_select_all_form($form, FormStateInterface $form_state) {
+  $element = inline_entity_form_get_element($form, $form_state);
+  $ief_id = $element['#ief_id'];
+  $form_state->setRebuild();
+
+  // Get the current form values.
+  $parents = array_merge($element['#field_parents'], [$element['#field_name']]);
+  $form_values = NestedArray::getValue($form_state->getUserInput(), $parents);
+
+  $triggering_element = $form_state->getTriggeringElement();
+  $form_state->set(['inline_entity_form', $ief_id, 'select_all'], $triggering_element['#ief_form']);
+  if (!empty($form_values['actions']['bundle'])) {
+    $form_state->set(['inline_entity_form', $ief_id, 'form settings'], [
+      'bundle' => $form_values['actions']['bundle'],
+    ]);
+  }
+  $form_state->setRebuild();
+}
+
+function ief_customize_build_entity_form_actions($element, FormStateInterface $form_state, $form) {
+  // Build a delta suffix that's appended to button #name keys for uniqueness.
+  $ief_id = $element['#ief_id'];
+  $delta = $element['#ief_row_delta'];
+  $entity = $element['#entity'];
+  /** @var \Drupal\Core\Field\FieldConfigInterface $instance */
+  $instance = $form_state->get(['inline_entity_form', $ief_id, 'instance']);
+  $widget = $form_state->get(['form_display'])->getComponent($instance->getName());
+
+  $entities = $form_state->get(['inline_entity_form', $ief_id, 'entities']);
+  $entities_count = count($entities);
+  $cardinality = $instance->getFieldStorageDefinition()->getCardinality();
+  $cardinality_reached = ($cardinality > 0 && $entities_count == $cardinality);
+
+  if ($widget['settings']['allow_duplicate'] && !$cardinality_reached && $entity->access('create')) {
+    $element['actions']['ief_entity_duplicate'] = [
+      '#type' => 'submit',
+      '#value' => t('Duplicate'),
+      '#name' => 'ief-' . $ief_id . '-entity-duplicate-' . $delta,
+      '#limit_validation_errors' => [array_merge($element['parents'], ['actions'])],
+      '#ajax' => [
+        'callback' => 'inline_entity_form_get_element',
+        'wrapper' => 'inline-entity-form-' . $ief_id,
+      ],
+      '#submit' => ['inline_entity_form_open_row_form'],
+      '#ief_row_delta' => $delta,
+      '#ief_row_form' => 'duplicate',
+    ];
+  }
+
+  if($widget['settings']['allow_existing'] || $entity->access('delete')) {
+    $element['actions']['ief_entity_remove'] = [
+      '#type' => 'submit',
+      '#value' => t('Remove'),
+      '#name' => 'ief-' . $ief_id . '-entity-remove-' . $delta,
+      '#limit_validation_errors' => [],
+      '#ajax' => [
+        'callback' => 'inline_entity_form_get_element',
+        'wrapper' => 'inline-entity-form-' . $ief_id,
+      ],
+      '#submit' => ['inline_entity_form_open_row_form'],
+      '#ief_row_delta' => $delta,
+      '#ief_row_form' => 'remove',
+    ];
+  }
+
+  if (!empty($element['actions']['ief_' . $element['#op'] . '_save'])) {
+    $element['actions']['ief_' . $element['#op'] . '_save']['#value'] = t('Update');
+  }
+  if (!empty($element['actions']['ief_' . $element['#op'] . '_cancel'])) {
+    $element['actions']['ief_' . $element['#op'] . '_cancel']['#access'] = FALSE;
+  }
+
+  return $element;
+}
+
+function ief_customize_build_remove_form(&$form, FieldDefinitionInterface $field, $widget) {
+  $labels = ief_customize_get_entity_type_labels($field, $widget);
+
+  $message = t('Are you sure you want to remove this %entity_type?', ['%entity_type' => $labels['singular']]);
+
+  $form['message'] = [
+    '#theme_wrappers' => ['container'],
+    '#markup' => $message,
+  ];
+
+  // Add actions to the form.
+  $form['actions'] = [
+    '#type' => 'container',
+    '#weight' => 100,
+  ];
+  $form['actions']['ief_remove_confirm'] = [
+    '#type' => 'submit',
+    '#value' => t('Remove'),
+    '#name' => 'ief-remove-confirm',
+    '#limit_validation_errors' => [$form['#parents']],
+    '#ajax' => [
+      'callback' => 'inline_entity_form_get_element',
+      'wrapper' => 'inline-entity-form-' . $form['#ief_id'],
+    ],
+    '#submit' => ['ief_customize_submit_confirm_remove'],
+    '#allow_existing' => $widget->getSettings()['allow_existing']
+  ];
+  $form['actions']['ief_remove_cancel'] = [
+    '#type' => 'submit',
+    '#value' => t('Cancel'),
+    '#name' => 'ief-remove-cancel',
+    '#limit_validation_errors' => [],
+    '#ajax' => [
+      'callback' => 'inline_entity_form_get_element',
+      'wrapper' => 'inline-entity-form-' . $form['#ief_id'],
+    ],
+    '#submit' => [['\Drupal\inline_entity_form\Plugin\Field\FieldWidget\InlineEntityFormComplex', 'closeForm']]
+  ];
+}
+
+function ief_customize_submit_confirm_remove($form, FormStateInterface $form_state) {
+  $element = inline_entity_form_get_element($form, $form_state);
+  $remove_button = $form_state->getTriggeringElement();
+
+  /** @var \Drupal\Core\Entity\EntityInterface $entity */
+  $parents = array_slice($remove_button['#parents'], 0, 2);
+  $form_values = NestedArray::getValue($form_state->getValues(), array_merge($parents, [/*'form', 'inline_entity_form', */'entities']));
+  $form_state->setRebuild();
+
+  $widget_state = $form_state->get(['inline_entity_form', $element['#ief_id']]);
+  foreach($form_values as $delta => $value) {
+    if ($value['select']) {
+      $entity = $element['entities'][$delta]['#entity'];
+      $entity_id = $entity->id();
+      if (empty($entity_id) || ($remove_button['#allow_existing'] && empty($form_values['delete']))) {
+        unset($widget_state['entities'][$delta]);
+      } else {
+        $widget_state['delete'][] = $entity;
+        unset($widget_state['entities'][$delta]);
+      }
+    }
+  }
+  // This entity hasn't been saved yet, we can just unlink it.
+  $form_state->set(['inline_entity_form', $element['#ief_id']], $widget_state);
+  $form_state->set(['inline_entity_form', $element['#ief_id'], 'form'], NULL);
+}
+
+/**
+ * Prepares variables for inline_entity_form_entity_table form templates.
+ *
+ * Default template: ief-customize-entity-table.html.twig.
+ *
+ * @param array $variables
+ *   An associative array containing:
+ *   - form: A render element representing the form.
+ */
+function template_preprocess_ief_customize_entity_table(array &$variables) {
+  $form = $variables['form'];
+  $entity_type = $form['#entity_type'];
+
+  $fields = $form['#table_fields'];
+  $has_tabledrag = \Drupal::entityTypeManager()->getHandler($entity_type, 'inline_form')->isTableDragEnabled($form);
+
+  // Sort the fields by weight.
+  uasort($fields, '\Drupal\Component\Utility\SortArray::sortByWeightElement');
+
+  $header = [];
+  $header[] = ['data' => "", 'class' => ['select-all']];
+  if ($has_tabledrag) {
+    $header[] = ['data' => '', 'class' => ['ief-tabledrag-header']];
+    $header[] = ['data' => t('Sort order'), 'class' => ['ief-sort-order-header']];
+  }
+  // Add header columns for each field.
+  $first = TRUE;
+  foreach ($fields as $field_name => $field) {
+    $column = ['data' => $field['label'], 'class' => ['inline-entity-form-' . $entity_type . '-' . $field_name]];
+    // The first column gets a special class.
+    if ($first) {
+      $column['class'][] = 'ief-first-column-header';
+      $first = FALSE;
+    }
+    $header[] = $column;
+  }
+  $header[] = t('Operations');
+
+  // Build an array of entity rows for the table.
+  $rows = [];
+  foreach (Element::children($form) as $key) {
+    /** @var \Drupal\Core\Entity\FieldableEntityInterface $entity */
+    $entity = $form[$key]['#entity'];
+    $row_classes = ['ief-row-entity'];
+    $cells = ['select' => ['#markup' => ""]];
+    if ($has_tabledrag) {
+      $cells[] = ['data' => ['#plain_text' => ''], '#wrapper_attributes' => ['class' => ['ief-tabledrag-handle']]];
+      $cells[] = ['data' => $form[$key]['delta']];
+      $row_classes[] = 'draggable';
+    }
+    // Add a special class to rows that have a form underneath, to allow
+    // for additional styling.
+    if (!empty($form[$key]['form'])) {
+      $row_classes[] = 'ief-row-entity-form';
+    }
+
+    foreach ($fields as $field_name => $field) {
+      if ($field['type'] == 'label') {
+        $data = ['#markup' => $variables['form'][$key]['#label']];
+      }
+      elseif ($field['type'] == 'field' && $entity->hasField($field_name)) {
+        $display_options = ['label' => 'hidden'];
+        if (isset($field['display_options'])) {
+          $display_options += $field['display_options'];
+        }
+        $data = $entity->get($field_name)->view($display_options);
+      }
+      elseif ($field['type'] == 'callback') {
+        $arguments = [
+          'entity' => $entity,
+          'variables' => $variables,
+        ];
+        if (isset($field['callback_arguments'])) {
+          $arguments = array_merge($arguments, $field['callback_arguments']);
+        }
+
+        $data = call_user_func_array($field['callback'], $arguments);
+
+        // Backward compatibility for callbacks that just provide a string not an array.
+        if(!is_array($data)) {
+          $data = ['#markup' => $data];
+        }
+      }
+      else {
+        $data = ['#markup' => t('N/A')];
+      }
+
+      if (!empty($form[$key]['form']['inline_entity_form'])) {
+        $form_field = &ief_customize_find_form_field_element($form[$key]['form']['inline_entity_form'], $field_name);
+        if ($form_field) {
+          ief_wrapper_hidden_label($form_field);
+          $data = ['#markup' => \Drupal::service('renderer')->render($form_field)];
+        }
+      }
+      $cells[$field_name] = array_merge($data, ['#wrapper_attributes' => ['class' => ['inline-entity-form-' . $entity_type . '-' . $field_name]]]);
+    }
+
+    // Add the buttons belonging to the "Operations" column, when entity is not
+    // being displayed as a form.
+
+    if (empty($form[$key]['form'])) {
+      $cells['actions'] = $form[$key]['actions'];
+    }
+    if (!empty($form[$key]['form']['inline_entity_form'])) {
+      $cells['actions'] = $data = ['#markup' => \Drupal::service('renderer')->render($form[$key]['form']['inline_entity_form']['actions'])];
+    }
+
+    if (!empty($form[$key]['select'])) {
+      $select = \Drupal::service('renderer')->render($form[$key]['select']);
+      $cells['select'] = ['data' => ['#markup' => $select], '#wrapper_attributes' => ['class' => ['ief-row-select']]];
+    }
+
+    // Create the row.
+    $rows[] = $cells + ['#attributes' => ['class' => $row_classes]];
+    // If the current entity array specifies a form, output it in the next row.
+    if (!empty($form[$key]['form']) && empty($form[$key]['form']['inline_entity_form'])) {
+      $row = [];
+      $row[] = $form[$key]['form'] + ['#wrapper_attributes' => ['colspan' => count($fields) + 1]];
+      $rows[] = $row + ['#attributes' => ['class' => ['ief-row-form'], 'no_striping' => TRUE]];
+    }
+  }
+
+  if (!empty($rows)) {
+    $tabledrag = [];
+    if ($has_tabledrag) {
+      $tabledrag = [
+        [
+          'action' => 'order',
+          'relationship' => 'sibling',
+          'group' => 'ief-entity-delta',
+        ],
+      ];
+    }
+
+    $variables['table'] = [
+        '#type' => 'table',
+        '#header' => $header,
+        '#attributes' => [
+          'id' => 'ief-entity-table-' . $form['#id'],
+          'class' => ['ief-entity-table'],
+        ],
+        '#tabledrag' => $tabledrag,
+      ] + $rows;
+  }
+}
+
+function &ief_customize_find_form_field_element(array &$element, $child) {
+  $ref = NULL;
+  if (isset($element[$child]) || array_key_exists($child, $element)) {
+    $ref = &$element[$child];
+  } else {
+    if ($childs = Element::children($element)) {
+      foreach ($childs as $child) {
+        $ret = &ief_customize_find_form_field_element($element[$child], $child);
+      }
+    }
+  }
+  return $ref;
+}
+
+function ief_wrapper_hidden_label(&$element)
+{
+  if (isset($element['#title_display'])) {
+    $element['#title_display'] = 'invisible';
+  }
+  if ($childs = Element::children($element)) {
+    foreach ($childs as $child) {
+      if (!empty($element[$child]['#type']) && in_array($element[$child]['#type'], array('checkboxes', 'radios'))) {
+        $element[$child]['#title_display'] = 'invisible';
+        continue;
+      }
+      ief_wrapper_hidden_label($element[$child]);
+    }
+  }
+}

@@ -1,0 +1,8 @@
+# Schema for the Dependent Field Value module.
+field.field.*.*.*.third_party.ief_customize:
+  type: mapping
+  label: 'IEF Customize settings'
+  mapping:
+    enable:
+      type: boolean
+      label: 'Enable Ief Customize Featues'
